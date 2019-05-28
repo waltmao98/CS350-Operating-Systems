@@ -1,8 +1,8 @@
 import subprocess
 import time
-from base_repeat_test import BaseRepeatTest
+from base_string_in_ouput_test import BaseStringInOuptutTest
  
-class LockTest(BaseRepeatTest):
+class LockTest(BaseStringInOuptutTest):
     """
     Test for A1 lock
     Test is synchtest.c, function locktest

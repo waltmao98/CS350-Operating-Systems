@@ -1,14 +1,14 @@
 import subprocess
 import time
-from base_repeat_test import BaseRepeatTest
+from base_string_in_ouput_test import BaseStringInOuptutTest
  
-class LockTest(BaseRepeatTest):
+class UWLockTest(BaseStringInOuptutTest):
     """
     Test for A1 lock
     Test is uw-tests.c, function uwlocktest1
     """
     def __init__(self):
-        super(LockTest, self).__init__(
+        super(UWLockTest, self).__init__(
             test_name="UW Lock test",
             test_cmd="sys161 kernel 'uw1;q'",
             success_msg="TEST SUCCEEDED",
@@ -16,7 +16,7 @@ class LockTest(BaseRepeatTest):
         )
 
 def main():
-    uw_lock_test = LockTest()
+    uw_lock_test = UWLockTest()
     uw_lock_test.run_test()
 
 if __name__== "__main__":
