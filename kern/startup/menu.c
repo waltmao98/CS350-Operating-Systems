@@ -604,6 +604,9 @@ static struct {
 	{ "fs3",	writestress },
 	{ "fs4",	writestress2 },
 	{ "fs5",	createstress },
+	
+	/* Tests for assignment problem functions */
+	{ "wg1",    testwg },  // test for A1 traffic synchronization problem WaitGroups 
 
 	{ NULL, NULL }
 };

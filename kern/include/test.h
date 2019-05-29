@@ -81,6 +81,9 @@ int malloctest(int, char **);
 int mallocstress(int, char **);
 int nettest(int, char **);
 
+/* Tests for assignment problem functions */
+int testwg(int, char **);
+
 /* Routine for running a user-level program. */
 int runprogram(char *progname);
 
