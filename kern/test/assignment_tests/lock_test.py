@@ -10,7 +10,7 @@ class LockTest(BaseStringInOuptutTest):
     def __init__(self):
         super(LockTest, self).__init__(
             test_name="Lock test",
-            test_cmd="sys161 kernel 'sy2;q'",
+            test_cmds="sys161 kernel 'sy2;q'",
             success_msg="Lock test done",
             fail_msg="thread_fork failed"
         )

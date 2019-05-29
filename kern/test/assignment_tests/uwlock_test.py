@@ -10,7 +10,7 @@ class UWLockTest(BaseStringInOuptutTest):
     def __init__(self):
         super(UWLockTest, self).__init__(
             test_name="UW Lock test",
-            test_cmd="sys161 kernel 'uw1;q'",
+            test_cmds="sys161 kernel 'uw1;q'",
             success_msg="TEST SUCCEEDED",
             fail_msg="TEST FAILED"
         )
