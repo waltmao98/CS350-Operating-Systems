@@ -9,6 +9,12 @@
 #include <thread.h>
 #include <addrspace.h>
 #include <copyinout.h>
+#include <mips/trapframe.h>
+#include "opt-A2.h"
+
+int setup_address_space(struct proc *child);
+void setup_parent_child(struct proc *child);
+struct trapframe *get_trapframe_copy(struct trapframe *tf);
 
   /* this implementation of sys__exit does not do anything with the exit code */
   /* this needs to be fixed to get exit() and waitpid() working properly */
@@ -49,14 +55,17 @@ void sys__exit(int exitcode) {
 }
 
 
-/* stub handler for getpid() system call                */
+/* getpid() system call                */
 int
 sys_getpid(pid_t *retval)
 {
-  /* for now, this is just a stub that always returns a PID of 1 */
-  /* you need to fix this to make it work properly */
+#if OPT_A2
+  *retval = curproc->p_pid;
+#else
   *retval = 1;
-  return(0);
+#endif /* OPT_A2 */
+
+  return 0;
 }
 
 /* stub handler for waitpid() system call                */
@@ -67,6 +76,8 @@ sys_waitpid(pid_t pid,
 	    int options,
 	    pid_t *retval)
 {
+  
+
   int exitstatus;
   int result;
 
@@ -92,3 +103,59 @@ sys_waitpid(pid_t pid,
   return(0);
 }
 
+int setup_address_space(struct proc *child) {
+  spinlock_acquire(&child->p_lock);
+  struct addrspace **child_addrspace = kmalloc(sizeof(struct addrspace **));
+  int err = as_copy(curproc_getas(), child_addrspace);
+  if (err != 0) {
+    return err;
+  }
+  KASSERT(*child_addrspace);
+  child->p_addrspace = *child_addrspace;
+  kfree(child_addrspace);
+  spinlock_release(&child->p_lock);
+  return 0;
+}
+
+struct trapframe *get_trapframe_copy(struct trapframe *tf) {
+  KASSERT(tf);
+  struct trapframe *copy = kmalloc(sizeof(struct trapframe));
+  memcpy(copy, tf, sizeof(struct trapframe));
+  KASSERT(copy);
+  return copy;
+}
+
+int sys_fork(struct trapframe *tf, pid_t *retval) {
+
+  struct proc *child = proc_create_runprogram(curproc->p_name);
+  if (!child) {
+    return ENOMEM;
+  }
+
+  // Create address space and copy code, data, and stack over
+  int err = setup_address_space(child);
+  if (err != 0) {
+    return err; // Probably ENOMEM
+  }
+
+  // Estabilish parent-child relationship
+  proc_add_child(child);
+
+  // Make deep copy of the trapframe
+  // It's the responsibility of enter_forked_process to free it
+  struct trapframe *tf_copy = get_trapframe_copy(tf);
+
+  pid_t child_pid = child->p_pid;
+
+  // Start new thread in child process
+  thread_fork(
+    "new process thread",
+    child,
+    enter_forked_process,
+    tf_copy,
+    (unsigned long) child->p_pid
+  );
+
+  *retval = (pid_t) child_pid;
+  return 0;
+}

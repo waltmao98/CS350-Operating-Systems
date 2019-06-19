@@ -35,6 +35,7 @@
 #include <thread.h>
 #include <current.h>
 #include <syscall.h>
+#include "opt-A2.h"
 
 
 /*
@@ -132,6 +133,12 @@ syscall(struct trapframe *tf)
 #endif // UW
 
 	    /* Add stuff here */
+
+#if OPT_A2
+	case SYS_fork:
+	  err = sys_fork(tf, (pid_t *)&retval);
+	  break;
+#endif /* OPT_A2 */
  
 	default:
 	  kprintf("Unknown syscall %d\n", callno);
@@ -170,14 +177,18 @@ syscall(struct trapframe *tf)
 
 /*
  * Enter user mode for a newly forked process.
- *
- * This function is provided as a reminder. You need to write
- * both it and the code that calls it.
- *
- * Thus, you can trash it and do things another way if you prefer.
+ * Needs to free the given trapframe copy
  */
 void
-enter_forked_process(struct trapframe *tf)
+enter_forked_process(void *tf, unsigned long pid)
 {
-	(void)tf;
+	KASSERT(tf);
+	KASSERT(pid > 0);
+
+	struct trapframe tf_copy = *((struct trapframe *)tf);
+	kfree(tf);
+	tf_copy.tf_v0 = 0;  // return value from fork
+	tf_copy.tf_a3 = 0;  // fork returned successfully in child
+	tf_copy.tf_epc += 4;  // advance the program counter
+	mips_usermode(&tf_copy);
 }

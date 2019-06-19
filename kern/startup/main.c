@@ -50,6 +50,7 @@
 #include <test.h>
 #include <version.h>
 #include "autoconf.h"  // for pseudoconfig
+#include "opt-A2.h"
 
 
 /*
@@ -146,7 +147,11 @@ shutdown(void)
 {
 
 	kprintf("Shutting down.\n");
-	
+
+#if OPT_A2
+	proc_down();
+#endif
+
 	vfs_clearbootfs();
 	vfs_clearcurdir();
 	vfs_unmountall();

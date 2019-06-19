@@ -50,6 +50,7 @@
 #include <vfs.h>
 #include <synch.h>
 #include <kern/fcntl.h>  
+#include "opt-A2.h"
 
 /*
  * The process for the kernel; this holds all the kernel-only threads.
@@ -98,6 +99,19 @@ proc_create(const char *name)
 
 	/* VFS fields */
 	proc->p_cwd = NULL;
+
+#if OPT_A2
+	/* PID */
+	spinlock_acquire(&proc_id_spinlock);
+	proc->p_pid = next_proc_id++;
+	spinlock_release(&proc_id_spinlock);
+
+	/* children array */
+	proc->p_children = array_create();
+
+	/* Parent */
+	proc->p_parent = NULL;
+#endif /* OPT_A2 */
 
 #ifdef UW
 	proc->console = NULL;
@@ -166,6 +180,17 @@ proc_destroy(struct proc *proc)
 	threadarray_cleanup(&proc->p_threads);
 	spinlock_cleanup(&proc->p_lock);
 
+#if OPT_A2
+	// TODO: do we need to do anyting with running children?
+	// array_destroy requires that the array is empty when it's called
+	int children_size = array_num(proc->p_children);
+	while (children_size > 0) {
+		array_remove(proc->p_children, 0);
+		--children_size;
+	}
+	array_destroy(proc->p_children);
+#endif /* OPT_A2 */
+
 	kfree(proc->p_name);
 	kfree(proc);
 
@@ -183,7 +208,6 @@ proc_destroy(struct proc *proc)
 	}
 	V(proc_count_mutex);
 #endif // UW
-	
 
 }
 
@@ -208,6 +232,18 @@ proc_bootstrap(void)
     panic("could not create no_proc_sem semaphore\n");
   }
 #endif // UW 
+
+#if OPT_A2
+  next_proc_id = 1;
+  spinlock_init(&proc_id_spinlock);
+#endif /* OPT_A2 */
+}
+
+/*
+Release any resources created in proc_bootstrap
+ */
+void proc_down(void) {
+	spinlock_cleanup(&proc_id_spinlock);
 }
 
 /*
@@ -322,6 +358,38 @@ proc_remthread(struct thread *t)
 	/* Did not find it. */
 	spinlock_release(&proc->p_lock);
 	panic("Thread (%p) has escaped from its process (%p)\n", t, proc);
+}
+
+/*
+Adds the given child proc to the curproc
+ */
+void proc_add_child(struct proc *child) {
+	KASSERT(child);
+	spinlock_acquire(&curproc->p_lock);
+	child->p_parent = curproc;
+	array_add(curproc->p_children, child, NULL);
+	spinlock_release(&curproc->p_lock);
+}
+
+/*
+Removes the given child proc from curproc
+ */
+void proc_remove_child(struct proc *child) {
+	KASSERT(child);
+	KASSERT(child->p_parent);
+	spinlock_acquire(&curproc->p_lock);
+	child->p_parent = NULL;
+	size_t childIndex = 0;
+	while (childIndex < array_num(curproc->p_children)) {
+		struct proc *p = (struct proc *) array_get(curproc->p_children, childIndex);
+		if (p->p_pid == child->p_pid) {
+			break;
+		}
+		++childIndex;
+	}
+	KASSERT(childIndex < array_num(curproc->p_children));
+	array_remove(curproc->p_children, childIndex);
+	spinlock_release(&curproc->p_lock);
 }
 
 /*
