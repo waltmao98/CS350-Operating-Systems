@@ -33,7 +33,7 @@
  * There is (intentionally) not much here; you will need to add stuff
  * and maybe change around what's already present.
  *
- * p_lock is intended to be held when manipulating the pointers in the
+ * p_spinlock is intended to be held when manipulating the pointers in the
  * proc structure, not while doing any significant work with the
  * things they point to. Rearrange this (and/or change it to be a
  * regular lock) as needed.
@@ -92,7 +92,7 @@ proc_create(const char *name)
 	}
 
 	threadarray_init(&proc->p_threads);
-	spinlock_init(&proc->p_lock);
+	spinlock_init(&proc->p_spinlock);
 
 	/* VM fields */
 	proc->p_addrspace = NULL;
@@ -111,6 +111,12 @@ proc_create(const char *name)
 
 	/* Parent */
 	proc->p_parent = NULL;
+	
+	/* fields for wait_pid() and exit() */
+	proc->p_alive = true;
+	proc->p_exit_code = -1;
+	proc->p_lock = lock_create("lock_for_wait_pid");
+	proc->p_wait_pid_cv = cv_create("cv_for_wait_pid");
 #endif /* OPT_A2 */
 
 #ifdef UW
@@ -139,7 +145,7 @@ proc_destroy(struct proc *proc)
 	KASSERT(proc != kproc);
 
 	/*
-	 * We don't take p_lock in here because we must have the only
+	 * We don't take p_spinlock in here because we must have the only
 	 * reference to this structure. (Otherwise it would be
 	 * incorrect to destroy it.)
 	 */
@@ -178,10 +184,9 @@ proc_destroy(struct proc *proc)
 #endif // UW
 
 	threadarray_cleanup(&proc->p_threads);
-	spinlock_cleanup(&proc->p_lock);
+	spinlock_cleanup(&proc->p_spinlock);
 
 #if OPT_A2
-	// TODO: do we need to do anyting with running children?
 	// array_destroy requires that the array is empty when it's called
 	int children_size = array_num(proc->p_children);
 	while (children_size > 0) {
@@ -189,6 +194,9 @@ proc_destroy(struct proc *proc)
 		--children_size;
 	}
 	array_destroy(proc->p_children);
+
+	lock_destroy(proc->p_lock);
+	cv_destroy(proc->p_wait_pid_cv);
 #endif /* OPT_A2 */
 
 	kfree(proc->p_name);
@@ -282,20 +290,20 @@ proc_create_runprogram(const char *name)
 	/* VFS fields */
 
 #ifdef UW
-	/* we do not need to acquire the p_lock here, the running thread should
+	/* we do not need to acquire the p_spinlock here, the running thread should
            have the only reference to this process */
-        /* also, acquiring the p_lock is problematic because VOP_INCREF may block */
+        /* also, acquiring the p_spinlock is problematic because VOP_INCREF may block */
 	if (curproc->p_cwd != NULL) {
 		VOP_INCREF(curproc->p_cwd);
 		proc->p_cwd = curproc->p_cwd;
 	}
 #else // UW
-	spinlock_acquire(&curproc->p_lock);
+	spinlock_acquire(&curproc->p_spinlock);
 	if (curproc->p_cwd != NULL) {
 		VOP_INCREF(curproc->p_cwd);
 		proc->p_cwd = curproc->p_cwd;
 	}
-	spinlock_release(&curproc->p_lock);
+	spinlock_release(&curproc->p_spinlock);
 #endif // UW
 
 #ifdef UW
@@ -321,9 +329,9 @@ proc_addthread(struct proc *proc, struct thread *t)
 
 	KASSERT(t->t_proc == NULL);
 
-	spinlock_acquire(&proc->p_lock);
+	spinlock_acquire(&proc->p_spinlock);
 	result = threadarray_add(&proc->p_threads, t, NULL);
-	spinlock_release(&proc->p_lock);
+	spinlock_release(&proc->p_spinlock);
 	if (result) {
 		return result;
 	}
@@ -344,20 +352,49 @@ proc_remthread(struct thread *t)
 	proc = t->t_proc;
 	KASSERT(proc != NULL);
 
-	spinlock_acquire(&proc->p_lock);
+	spinlock_acquire(&proc->p_spinlock);
 	/* ugh: find the thread in the array */
 	num = threadarray_num(&proc->p_threads);
 	for (i=0; i<num; i++) {
 		if (threadarray_get(&proc->p_threads, i) == t) {
 			threadarray_remove(&proc->p_threads, i);
-			spinlock_release(&proc->p_lock);
+			spinlock_release(&proc->p_spinlock);
 			t->t_proc = NULL;
 			return;
 		}
 	}
 	/* Did not find it. */
-	spinlock_release(&proc->p_lock);
+	spinlock_release(&proc->p_spinlock);
 	panic("Thread (%p) has escaped from its process (%p)\n", t, proc);
+}
+
+bool is_child_process_of_curproc(pid_t pid) {
+  struct proc *parent = curproc;
+  spinlock_acquire(&parent->p_spinlock);
+  for (size_t i = 0; i < array_num(parent->p_children); ++i) {
+    struct proc *child = (struct proc*) array_get(parent->p_children, i);
+    if (child->p_pid == pid) {
+      spinlock_release(&parent->p_spinlock);
+      return true;
+    }
+  }
+  spinlock_release(&parent->p_spinlock);
+  return false;
+}
+
+struct proc *proc_get_child(pid_t child_pid) {
+	KASSERT(is_child_process_of_curproc(child_pid));
+	spinlock_acquire(&curproc->p_spinlock);
+	for (size_t i = 0; i < array_num(curproc->p_children); ++i) {
+		struct proc *p = (struct proc *) array_get(curproc->p_children, i);
+		if (child_pid == p->p_pid) {
+			spinlock_release(&curproc->p_spinlock);
+			return p;
+		}
+	}
+	spinlock_release(&curproc->p_spinlock);
+	KASSERT(false);
+	return NULL;
 }
 
 /*
@@ -365,19 +402,19 @@ Adds the given child proc to the curproc
  */
 void proc_add_child(struct proc *child) {
 	KASSERT(child);
-	spinlock_acquire(&curproc->p_lock);
+	spinlock_acquire(&curproc->p_spinlock);
 	child->p_parent = curproc;
 	array_add(curproc->p_children, child, NULL);
-	spinlock_release(&curproc->p_lock);
+	spinlock_release(&curproc->p_spinlock);
 }
 
 /*
-Removes the given child proc from curproc
+Removes the given child proc from curproc and sets its parent pointer to NULL
  */
 void proc_remove_child(struct proc *child) {
 	KASSERT(child);
 	KASSERT(child->p_parent);
-	spinlock_acquire(&curproc->p_lock);
+	spinlock_acquire(&curproc->p_spinlock);
 	child->p_parent = NULL;
 	size_t childIndex = 0;
 	while (childIndex < array_num(curproc->p_children)) {
@@ -389,7 +426,8 @@ void proc_remove_child(struct proc *child) {
 	}
 	KASSERT(childIndex < array_num(curproc->p_children));
 	array_remove(curproc->p_children, childIndex);
-	spinlock_release(&curproc->p_lock);
+	child->p_parent = NULL;
+	spinlock_release(&curproc->p_spinlock);
 }
 
 /*
@@ -410,9 +448,9 @@ curproc_getas(void)
 	}
 #endif
 
-	spinlock_acquire(&curproc->p_lock);
+	spinlock_acquire(&curproc->p_spinlock);
 	as = curproc->p_addrspace;
-	spinlock_release(&curproc->p_lock);
+	spinlock_release(&curproc->p_spinlock);
 	return as;
 }
 
@@ -426,9 +464,9 @@ curproc_setas(struct addrspace *newas)
 	struct addrspace *oldas;
 	struct proc *proc = curproc;
 
-	spinlock_acquire(&proc->p_lock);
+	spinlock_acquire(&proc->p_spinlock);
 	oldas = proc->p_addrspace;
 	proc->p_addrspace = newas;
-	spinlock_release(&proc->p_lock);
+	spinlock_release(&proc->p_spinlock);
 	return oldas;
 }

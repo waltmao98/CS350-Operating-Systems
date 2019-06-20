@@ -10,6 +10,7 @@
 #include <addrspace.h>
 #include <copyinout.h>
 #include <mips/trapframe.h>
+#include <synch.h>
 #include "opt-A2.h"
 
 int setup_address_space(struct proc *child);
@@ -23,9 +24,6 @@ void sys__exit(int exitcode) {
 
   struct addrspace *as;
   struct proc *p = curproc;
-  /* for now, just include this to keep the compiler from complaining about
-     an unused variable */
-  (void)exitcode;
 
   DEBUG(DB_SYSCALL,"Syscall: _exit(%d)\n",exitcode);
 
@@ -44,10 +42,37 @@ void sys__exit(int exitcode) {
   /* detach this thread from its process */
   /* note: curproc cannot be used after this call */
   proc_remthread(curthread);
+  
+  lock_acquire(p->p_lock);
+  p->p_alive = false;
+  p->p_exit_code = exitcode;
 
-  /* if this is the last user process in the system, proc_destroy()
+  // Go through every child
+  // If child is dead, then we can destroy it
+  // If child is not dead, we set its parent pointer to NULL
+	while (array_num(p->p_children) > 0) {
+		struct proc *child = (struct proc *) array_get(p->p_children, 0);
+    lock_acquire(child->p_lock);
+    array_remove(p->p_children, 0);
+    child->p_parent = NULL;
+    if (!child->p_alive) {
+      lock_release(child->p_lock);
+      proc_destroy(child);
+    } else {
+      lock_release(child->p_lock);
+    }
+	}
+
+  // If this process's parent is dead
+  if (!p->p_parent) {
+    lock_release(p->p_lock);
+    /* if this is the last user process in the system, proc_destroy()
      will wake up the kernel menu thread */
-  proc_destroy(p);
+    proc_destroy(p);
+  } else {
+    cv_signal(p->p_wait_pid_cv, p->p_lock);
+    lock_release(p->p_lock);
+  }
   
   thread_exit();
   /* thread_exit() does not return, so we should never get here */
@@ -68,7 +93,7 @@ sys_getpid(pid_t *retval)
   return 0;
 }
 
-/* stub handler for waitpid() system call                */
+/* sys_waitpid ////////////////////////// */
 
 int
 sys_waitpid(pid_t pid,
@@ -76,10 +101,47 @@ sys_waitpid(pid_t pid,
 	    int options,
 	    pid_t *retval)
 {
-  
+  if (options != 0) {
+    *retval = -1;
+    return EINVAL;
+  }
+
+  if (!status) {
+    *retval = -1;
+    return EFAULT;
+  }
+
+  KASSERT(pid > 0);
+  if (!is_child_process_of_curproc(pid)) {
+    *retval = -1;
+    return ECHILD;
+  }
 
   int exitstatus;
   int result;
+
+  struct proc *child = proc_get_child(pid);
+  KASSERT(child);
+
+  // If child is already dead, get the pid and return
+  lock_acquire(child->p_lock);
+  if (child->p_alive) {
+    // Go to sleep until child calls exit()
+    cv_wait(child->p_wait_pid_cv, child->p_lock);
+    // Child has called exit()
+  }
+  exitstatus = _MKWAIT_EXIT(child->p_exit_code);
+  lock_release(child->p_lock);
+
+  proc_remove_child(child);
+  proc_destroy(child);
+  result = copyout((void *)&exitstatus,status,sizeof(int));
+  if (result) {
+    *retval = -1;
+    return result;
+  }
+  *retval = pid;
+  return 0;
 
   /* this is just a stub implementation that always reports an
      exit status of 0, regardless of the actual exit status of
@@ -88,12 +150,12 @@ sys_waitpid(pid_t pid,
      is still running, and even if it never existed in the first place.
 
      Fix this!
-  */
+  
 
   if (options != 0) {
     return(EINVAL);
   }
-  /* for now, just pretend the exitstatus is 0 */
+  // for now, just pretend the exitstatus is 0
   exitstatus = 0;
   result = copyout((void *)&exitstatus,status,sizeof(int));
   if (result) {
@@ -101,10 +163,13 @@ sys_waitpid(pid_t pid,
   }
   *retval = pid;
   return(0);
+  */
 }
 
+/* sys_fork ////////////////////////// */
+
 int setup_address_space(struct proc *child) {
-  spinlock_acquire(&child->p_lock);
+  spinlock_acquire(&child->p_spinlock);
   struct addrspace **child_addrspace = kmalloc(sizeof(struct addrspace **));
   int err = as_copy(curproc_getas(), child_addrspace);
   if (err != 0) {
@@ -113,7 +178,7 @@ int setup_address_space(struct proc *child) {
   KASSERT(*child_addrspace);
   child->p_addrspace = *child_addrspace;
   kfree(child_addrspace);
-  spinlock_release(&child->p_lock);
+  spinlock_release(&child->p_spinlock);
   return 0;
 }
 

@@ -14,6 +14,7 @@ class PIDCheckTest(BaseRepeatTest):
         )
 
     def check_output(self, output, **kwargs):
+        super(PIDCheckTest, self).check_output(output, **kwargs)
         for line in output.splitlines():
             if line.startswith("C: "):
                 child_pid_seen_by_child = int(line[len("C: ")].strip())
