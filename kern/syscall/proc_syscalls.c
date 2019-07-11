@@ -11,14 +11,96 @@
 #include <copyinout.h>
 #include <mips/trapframe.h>
 #include <synch.h>
+#include <vfs.h>
+#include <kern/fcntl.h>
 #include "opt-A2.h"
 
 int setup_address_space(struct proc *child);
 void setup_parent_child(struct proc *child);
 struct trapframe *get_trapframe_copy(struct trapframe *tf);
 
-  /* this implementation of sys__exit does not do anything with the exit code */
-  /* this needs to be fixed to get exit() and waitpid() working properly */
+int sys_execv(userptr_t progname, userptr_t args) {
+
+	struct addrspace *as;
+  struct vnode *v;
+	vaddr_t entrypoint, stackptr;
+  int result;
+
+
+  // copy args
+  char **user_args = (char **) args;
+  size_t num_args = 0; // number of args
+  while (user_args[num_args]) {
+    num_args += 1;
+  }
+
+  char **args_copy = kmalloc(sizeof(char *) * num_args);
+  for (size_t i = 0; i < num_args; ++i) {
+    args_copy[i] = kmalloc(sizeof(char) * (strlen(user_args[i]) + 1));
+    result = copyinstr((userptr_t)user_args[i], args_copy[i], strlen(user_args[i]) + 1, NULL);
+    if (result) {
+      return result;
+    }
+  }
+
+
+	/* Open the file. */
+  char *program_name_temp = kstrdup((char *)progname); // make copy of program path
+  result = vfs_open(program_name_temp, O_RDONLY, 0, &v);
+  kfree(program_name_temp);
+  if (result) {
+    return result;
+  }
+
+  /* Create a new address space. */
+	as = as_create();
+	if (as ==NULL) {
+		vfs_close(v);
+    for (size_t i = 0; i < num_args; ++i) kfree(args_copy[i]);
+    kfree(args_copy);
+		return ENOMEM;
+	}
+
+  /* Switch to it and activate it. */
+  struct addrspace *old_as = curproc_setas(as);
+	as_activate();
+
+  /* Load the executable. */
+	result = load_elf(v, &entrypoint);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+    for (size_t i = 0; i < num_args; ++i) kfree(args_copy[i]);
+    kfree(args_copy);
+		vfs_close(v);
+		return result;
+	}
+
+	vfs_close(v); /* Done with the file now. */
+  as_destroy(old_as); // Destroy the old address space
+
+  /* Define the user stack in the address space */
+	result = as_define_stack(as, &stackptr, args_copy, num_args);
+	if (result) {
+		/* p_addrspace will go away when curproc is destroyed */
+    for (size_t i = 0; i < num_args; ++i) kfree(args_copy[i]);
+    kfree(args_copy);
+		return result;
+	}
+
+  // free copy of args
+  for (size_t i = 0; i < num_args; ++i) kfree(args_copy[i]);
+  kfree(args_copy);
+
+  /* Warp to user mode. */
+	enter_new_process(
+    num_args /*argc*/, 
+    (userptr_t) stackptr /*userspace addr of argv*/,
+		stackptr, 
+    entrypoint
+  );
+
+  return -1; // execv failed
+}
 
 void sys__exit(int exitcode) {
 
@@ -142,28 +224,6 @@ sys_waitpid(pid_t pid,
   }
   *retval = pid;
   return 0;
-
-  /* this is just a stub implementation that always reports an
-     exit status of 0, regardless of the actual exit status of
-     the specified process.   
-     In fact, this will return 0 even if the specified process
-     is still running, and even if it never existed in the first place.
-
-     Fix this!
-  
-
-  if (options != 0) {
-    return(EINVAL);
-  }
-  // for now, just pretend the exitstatus is 0
-  exitstatus = 0;
-  result = copyout((void *)&exitstatus,status,sizeof(int));
-  if (result) {
-    return(result);
-  }
-  *retval = pid;
-  return(0);
-  */
 }
 
 /* sys_fork ////////////////////////// */

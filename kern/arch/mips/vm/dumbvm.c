@@ -36,6 +36,7 @@
 #include <current.h>
 #include <mips/tlb.h>
 #include <addrspace.h>
+#include <copyinout.h>
 #include <vm.h>
 
 /*
@@ -342,12 +343,53 @@ as_complete_load(struct addrspace *as)
 	return 0;
 }
 
+/*
+args: array of arguments without the final NULL value. This function will populate the 
+last NULL value.
+num_args: number of arguments.
+ */
 int
-as_define_stack(struct addrspace *as, vaddr_t *stackptr)
+as_define_stack(struct addrspace *as, vaddr_t *stackptr, char **args, size_t num_args)
 {
 	KASSERT(as->as_stackpbase != 0);
-
 	*stackptr = USERSTACK;
+	size_t got;
+	int result;
+	
+	// If arguments are being passed
+	if (args && num_args > 0) {
+		// Push args onto the user stack and save their addresses
+		// in temp_arg_locations so we can push the addresses onto 
+		// the user stack later
+		vaddr_t **temp_arg_locations = kmalloc(sizeof(vaddr_t *) * (num_args + 1));
+		for (size_t i = 0; i < num_args; ++i) {
+			int argsize = strlen(args[i]) + 1;
+			int offset = ROUNDUP(argsize * sizeof(char), 8);
+			*stackptr -= offset;
+			result = copyoutstr(args[i], (userptr_t)*stackptr, argsize, &got);
+			if (result) {
+				kfree(temp_arg_locations);
+				return result;
+			}
+			temp_arg_locations[i] = (vaddr_t*)*stackptr;
+		}
+		temp_arg_locations[num_args] = NULL; // Last arg is NULL
+
+		// Push the addresses of the args, which will become the argv value in 
+		// the new program's main function
+		for (int i = num_args; i >= 0; --i) {
+			int offset = ROUNDUP(sizeof(vaddr_t *), 4);
+			*stackptr -= offset;
+			result = copyout(&temp_arg_locations[i], (userptr_t)*stackptr, sizeof(vaddr_t *));
+			if (result) {
+				kfree(temp_arg_locations);
+				return result;
+			}
+		}
+
+		kfree(temp_arg_locations);
+	}
+
 	return 0;
 }
 
