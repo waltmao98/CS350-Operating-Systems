@@ -52,10 +52,55 @@
  */
 static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 
-void
-vm_bootstrap(void)
-{
-	/* Do nothing. */
+bool vm_booted = false;
+
+static paddr_t cm_start; /* address of first coremap entry */
+static paddr_t cm_end; /* one past end of last coremap entry */
+static size_t cm_length; /* number of coremap entries */
+static paddr_t mem_begin; /* address of first allocable memory - page aligned */
+
+// Given a coremap index i, return the coremap entry at i
+struct coremap_entry *get_entry(int i) {
+	KASSERT(i >= 0);
+	return (struct coremap_entry *) PADDR_TO_KVADDR(cm_start + i * sizeof(struct coremap_entry));
+}
+
+// Given a virtual address v_addr, return the corresponding coremap idx
+size_t get_coremap_idx_from_va(vaddr_t v_addr) {
+	KASSERT(v_addr);
+	paddr_t p_addr = v_addr - MIPS_KSEG0;  // convert virtual address to physical address
+	KASSERT(p_addr >= mem_begin);
+	KASSERT((p_addr - mem_begin) % PAGE_SIZE == 0);
+	return (size_t)((p_addr - mem_begin) / PAGE_SIZE);
+}
+
+void vm_bootstrap() {
+	// Initialize cm_start and cm_end (start and end addresses of the coremap)
+    paddr_t first_addr;
+    paddr_t last_addr;
+    ram_getsize(&first_addr, &last_addr);
+	KASSERT(last_addr > first_addr);
+    
+    size_t pages_available_including_cm =  ((size_t)(last_addr - first_addr)) / PAGE_SIZE;
+	paddr_t cm_end_temp = first_addr + pages_available_including_cm * sizeof(struct coremap_entry);
+    size_t pages_available_excluding_cm =  ((size_t)(last_addr - cm_end_temp)) / PAGE_SIZE;
+    size_t pages_in_cm = pages_available_including_cm - pages_available_excluding_cm;
+    
+	mem_begin = ROUNDUP(cm_end_temp, PAGE_SIZE);  // page-align
+	cm_end = cm_end_temp - (pages_in_cm + 1) * sizeof(struct coremap_entry); // +1 to match the mem_begin ROUNDUP
+	cm_end = ROUNDUP(cm_end, sizeof(struct coremap_entry));
+	cm_start = first_addr;
+	cm_length = (cm_end - cm_start) / sizeof(struct coremap_entry);
+	KASSERT(cm_length < pages_available_excluding_cm);  // allow 1 unindexed page at the end
+
+	// Set all entries to unused state
+	for (size_t i = 0; i < cm_length; ++i) {
+		struct coremap_entry *entry = get_entry(i);
+		entry->used = false;
+		entry->num_pages_allocated = 0;
+	}
+
+	vm_booted = true;
 }
 
 static
@@ -66,30 +111,117 @@ getppages(unsigned long npages)
 
 	spinlock_acquire(&stealmem_lock);
 
-	addr = ram_stealmem(npages);
+	if (vm_booted) {
+		addr = alloc_kpages_vm(npages);
+	} else {
+		addr = ram_stealmem(npages);
+	}
 	
 	spinlock_release(&stealmem_lock);
 	return addr;
 }
 
+/*
+Returns true if there exists a block of n pages available starting
+with start_idx, else false.
+ */
+bool exists_n_contiguous_pages(size_t n, size_t start_idx) {
+	if (start_idx + n >= cm_length) {
+		return false;  // the block goes out of bounds
+	}
+
+	for (size_t j = 0; j < n; ++j) {
+		struct coremap_entry *entry = get_entry(start_idx + j);
+		KASSERT(entry);
+		if (entry->used) {
+			return false;
+		}
+	}
+	
+	return true;
+}
+
+// Sets the n contiguous entries starting at start_idx to used and sets
+// the num_pages_allocated to n
+void allocate_n_contiguous_pages(int n, size_t start_idx) {
+	KASSERT(n > 0);
+	KASSERT(start_idx + n <= cm_length); // assert in bounds
+
+	// Set num_pages_allocated of the first entry
+	struct coremap_entry *start_addr = get_entry(start_idx);
+	KASSERT(start_addr);
+	start_addr->num_pages_allocated = n;
+
+	// Set the used flag of each entry in the block to true
+	for (size_t i = 0; i < (size_t)n; ++i) {
+		struct coremap_entry *entry = get_entry(start_idx + i);
+		KASSERT(entry);
+		entry->used = true;
+	}
+}
+
+paddr_t alloc_kpages_vm(int npages) {
+	paddr_t pa = 0;
+	size_t start_idx;
+	for (start_idx = 0; start_idx < cm_length; ++start_idx) {
+		if (!exists_n_contiguous_pages(npages, start_idx)) {
+			continue;
+		}
+		allocate_n_contiguous_pages(npages, start_idx);
+		pa = mem_begin + start_idx * PAGE_SIZE;
+		break;
+	}
+	//kprintf("\nalloc_kpages_vm: Allocated %d pages starting at physical address 0x%x with coremap index %d\n", npages, pa, (int)start_idx);
+	return pa;
+}
+
 /* Allocate/free some kernel-space virtual pages */
-vaddr_t 
-alloc_kpages(int npages)
-{
+vaddr_t alloc_kpages(int npages) {
+	KASSERT(npages >= 0);
+	if (npages == 0) {
+		return 0;
+	}
 	paddr_t pa;
 	pa = getppages(npages);
+
 	if (pa==0) {
 		return 0;
 	}
 	return PADDR_TO_KVADDR(pa);
 }
 
-void 
-free_kpages(vaddr_t addr)
-{
-	/* nothing - leak the memory. */
+void free_kpages_pa(paddr_t p_addr) {
+	free_kpages(PADDR_TO_KVADDR(p_addr));
+}
 
-	(void)addr;
+void free_kpages(vaddr_t addr) {
+	if (!addr) {
+		return;
+	}
+	spinlock_acquire(&stealmem_lock);
+
+	// Get the coremap entry of the first page
+	size_t begin_idx = get_coremap_idx_from_va(addr);
+	struct coremap_entry *begin_entry = get_entry(begin_idx);
+	KASSERT(begin_entry);
+	
+	int num_pages_allocated = begin_entry->num_pages_allocated;
+	if (num_pages_allocated == 0) {
+		return;
+	}
+	//kprintf("\nfree_kpages: freeing %d pages starting at physical address 0x%x with coremap idx %d\n", num_pages_allocated, addr - MIPS_KSEG0, (int)begin_idx);
+
+	KASSERT(begin_idx + num_pages_allocated <= cm_length);
+
+	for (int i = 0; i < num_pages_allocated; ++i) {
+		struct coremap_entry *entry = get_entry(begin_idx + i);
+		KASSERT(entry);
+		KASSERT(entry->used);
+		entry->used = false;
+		entry->num_pages_allocated = 0;
+	}
+
+	spinlock_release(&stealmem_lock);
 }
 
 void
@@ -114,6 +246,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	uint32_t ehi, elo;
 	struct addrspace *as;
 	int spl;
+	bool is_read_only = false;
 
 	faultaddress &= PAGE_FRAME;
 
@@ -121,8 +254,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	switch (faulttype) {
 	    case VM_FAULT_READONLY:
-		/* We always create pages read-write, so we can't get this */
-		panic("dumbvm: got VM_FAULT_READONLY\n");
+			return EROFS;
 	    case VM_FAULT_READ:
 	    case VM_FAULT_WRITE:
 		break;
@@ -171,6 +303,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	if (faultaddress >= vbase1 && faultaddress < vtop1) {
 		paddr = (faultaddress - vbase1) + as->as_pbase1;
+		is_read_only = true;
 	}
 	else if (faultaddress >= vbase2 && faultaddress < vtop2) {
 		paddr = (faultaddress - vbase2) + as->as_pbase2;
@@ -195,15 +328,23 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		}
 		ehi = faultaddress;
 		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+		if (is_read_only && as->load_elf_completed) {
+			elo&=~TLBLO_DIRTY;
+		}
 		DEBUG(DB_VM, "dumbvm: 0x%x -> 0x%x\n", faultaddress, paddr);
 		tlb_write(ehi, elo, i);
 		splx(spl);
 		return 0;
 	}
 
-	kprintf("dumbvm: Ran out of TLB entries - cannot handle page fault\n");
+	ehi = faultaddress;
+	elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+	if (is_read_only && as->load_elf_completed) {
+		elo&=~TLBLO_DIRTY;
+	}
+	tlb_random(ehi, elo);
 	splx(spl);
-	return EFAULT;
+	return 0;
 }
 
 struct addrspace *
@@ -221,6 +362,7 @@ as_create(void)
 	as->as_pbase2 = 0;
 	as->as_npages2 = 0;
 	as->as_stackpbase = 0;
+	as->load_elf_completed = false;
 
 	return as;
 }
@@ -228,6 +370,9 @@ as_create(void)
 void
 as_destroy(struct addrspace *as)
 {
+	free_kpages_pa(as->as_stackpbase);
+	free_kpages_pa(as->as_pbase2);
+	free_kpages_pa(as->as_pbase1);
 	kfree(as);
 }
 

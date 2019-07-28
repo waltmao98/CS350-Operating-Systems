@@ -49,6 +49,8 @@ class BaseRepeatTest(object):
         assert "panic" not in output
         assert "error" not in output
         assert "failed" not in output
+        assert "Fail" not in output
+        assert "FAIL" not in output
         assert "KASSERT" not in output
 
     def _print_success(self, start_time, end_time):

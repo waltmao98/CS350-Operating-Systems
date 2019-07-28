@@ -98,6 +98,18 @@
  * in bootup before VM initialization is complete.
  */
 
+struct coremap_entry {
+    bool used;
+    size_t num_pages_allocated;
+};
+
+struct coremap_entry *get_entry(int i);
+size_t get_coremap_idx_from_va(vaddr_t v_addr);
+bool exists_n_contiguous_pages(size_t n, size_t start_idx);
+void allocate_n_contiguous_pages(int n, size_t start_idx);
+void free_kpages_pa(paddr_t p_addr);
+paddr_t alloc_kpages_vm(int npages);
+
 void ram_bootstrap(void);
 paddr_t ram_stealmem(unsigned long npages);
 void ram_getsize(paddr_t *lo, paddr_t *hi);
