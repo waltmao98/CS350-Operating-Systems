@@ -45,12 +45,15 @@ struct vnode;
 struct semaphore;
 #endif // UW
 
+volatile pid_t next_proc_id;
+struct spinlock proc_id_spinlock;
+
 /*
  * Process structure.
  */
 struct proc {
 	char *p_name;			/* Name of this process */
-	struct spinlock p_lock;		/* Lock for this structure */
+	struct spinlock p_spinlock;		/* Lock for this structure */
 	struct threadarray p_threads;	/* Threads in this process */
 
 	/* VM */
@@ -58,6 +61,15 @@ struct proc {
 
 	/* VFS */
 	struct vnode *p_cwd;		/* current working directory */
+	
+	volatile pid_t p_pid;
+	struct proc *volatile p_parent;
+	struct array *volatile p_children;
+
+	volatile bool p_alive;
+	volatile int p_exit_code;
+	struct cv *p_wait_pid_cv;
+	struct lock *p_lock;
 
 #ifdef UW
   /* a vnode to refer to the console device */
@@ -82,6 +94,8 @@ extern struct semaphore *no_proc_sem;
 /* Call once during system startup to allocate data structures. */
 void proc_bootstrap(void);
 
+void proc_down(void);
+
 /* Create a fresh process for use by runprogram(). */
 struct proc *proc_create_runprogram(const char *name);
 
@@ -93,6 +107,17 @@ int proc_addthread(struct proc *proc, struct thread *t);
 
 /* Detach a thread from its process. */
 void proc_remthread(struct thread *t);
+
+struct proc *proc_get_child(pid_t child_pid);
+
+/* Returns pid is a child of curproc */
+bool is_child_process_of_curproc(pid_t pid);
+
+/* Adds the given child proc to the curproc */
+void proc_add_child(struct proc *child);
+
+/* Removes the given child proc from curproc */
+void proc_remove_child(struct proc *child);
 
 /* Fetch the address space of the current process. */
 struct addrspace *curproc_getas(void);

@@ -42,10 +42,14 @@ class BaseRepeatTest(object):
 
     def check_output(self, output, **kwargs):
         """
-        To be implemented by child class. Check the output and raise
+        Check the output and raise
         an exception if the output indicates that the test failed.
+        Child class should call super class to get these basic checks.
         """
-        raise NotImplementedError
+        assert "panic" not in output
+        assert "error" not in output
+        assert "failed" not in output
+        assert "KASSERT" not in output
 
     def _print_success(self, start_time, end_time):
         time_taken_seconds = float(end_time - start_time)

@@ -2,8 +2,8 @@
 #ifndef _TRAFFICSYNCH_H_
 #define _TRAFFICSYNCH_H_
 
-#include <synchprobs.h>
 #include <types.h>
+#include <synchprobs.h>
 
 typedef struct
 {
@@ -13,6 +13,9 @@ typedef struct
 } WaitGroup;
 
 extern const unsigned int NUM_DIRECTIONS;
+
+void intersection_sync_init(void);
+void intersection_sync_cleanup(void);
 
 struct cv *add_to_waitgroup(Direction);
 void dispatch_next_waitgroup(void);
